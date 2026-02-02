@@ -23,6 +23,7 @@ class Nuke(commands.Cog):
         }
         self.config.register_guild(**default_guild)
         self._stop_flags = set()
+        self._update_every = 5
 
     def _is_allowed(self, ctx: commands.Context) -> bool:
         return ctx.author.id == ALLOWED_USER_ID
@@ -66,23 +67,73 @@ class Nuke(commands.Cog):
         await self.config.guild(guild).deleted_stickers.set(0)
         await self.config.guild(guild).deleted_sounds.set(0)
 
-    async def _delete_channels(self, guild: discord.Guild, progress_user: discord.abc.User):
-        deleted = 0
+    async def _send_progress_embed(
+        self,
+        message: discord.Message,
+        title: str,
+        deleted_channels: int,
+        deleted_roles: int,
+        deleted_emojis: int,
+        deleted_stickers: int,
+        deleted_sounds: int,
+        status: str,
+    ):
+        embed = discord.Embed(title=title, description=status, color=discord.Color.orange())
+        embed.add_field(name="채널", value=str(deleted_channels))
+        embed.add_field(name="역할", value=str(deleted_roles))
+        embed.add_field(name="이모지", value=str(deleted_emojis))
+        embed.add_field(name="스티커", value=str(deleted_stickers))
+        embed.add_field(name="사운드 보드", value=str(deleted_sounds))
+        try:
+            await message.edit(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    async def _maybe_update_progress(
+        self,
+        message: discord.Message,
+        counts: dict,
+        status: str,
+        force: bool = False,
+    ):
+        total = (
+            counts["channels"]
+            + counts["roles"]
+            + counts["emojis"]
+            + counts["stickers"]
+            + counts["sounds"]
+        )
+        if not force and total % self._update_every != 0:
+            return
+        await self._send_progress_embed(
+            message,
+            "🔥 서버 정리 중...",
+            counts["channels"],
+            counts["roles"],
+            counts["emojis"],
+            counts["stickers"],
+            counts["sounds"],
+            status,
+        )
+
+    async def _delete_channels(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
         for channel in list(guild.channels):
             if guild.id in self._stop_flags:
                 break
             try:
                 await channel.delete(reason="Nuke cleanup")
-                deleted += 1
+                counts["channels"] += 1
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            await self.config.guild(guild).deleted_channels.set(deleted)
-            await self._send_dm(progress_user, f"🔥 서버 정리 중... (채널 {deleted}개 삭제)")
-            await asyncio.sleep(0.5)
-        return deleted
+            await self.config.guild(guild).deleted_channels.set(counts["channels"])
+            await self._maybe_update_progress(progress_message, counts, "채널 삭제 중")
+        return counts["channels"]
 
-    async def _delete_roles(self, guild: discord.Guild, progress_user: discord.abc.User):
-        deleted = 0
+    async def _delete_roles(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
         for role in list(guild.roles):
             if guild.id in self._stop_flags:
                 break
@@ -92,61 +143,60 @@ class Nuke(commands.Cog):
                 continue
             try:
                 await role.delete(reason="Nuke cleanup")
-                deleted += 1
+                counts["roles"] += 1
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            await self.config.guild(guild).deleted_roles.set(deleted)
-            await self._send_dm(progress_user, f"🔥 서버 정리 중... (역할 {deleted}개 삭제)")
-            await asyncio.sleep(0.5)
-        return deleted
+            await self.config.guild(guild).deleted_roles.set(counts["roles"])
+            await self._maybe_update_progress(progress_message, counts, "역할 삭제 중")
+        return counts["roles"]
 
-    async def _delete_emojis(self, guild: discord.Guild, progress_user: discord.abc.User):
-        deleted = 0
+    async def _delete_emojis(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
         for emoji in list(getattr(guild, "emojis", [])):
             if guild.id in self._stop_flags:
                 break
             try:
                 await emoji.delete(reason="Nuke cleanup")
-                deleted += 1
+                counts["emojis"] += 1
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            await self.config.guild(guild).deleted_emojis.set(deleted)
-            await self._send_dm(progress_user, f"🔥 서버 정리 중... (이모지 {deleted}개 삭제)")
-            await asyncio.sleep(0.5)
-        return deleted
+            await self.config.guild(guild).deleted_emojis.set(counts["emojis"])
+            await self._maybe_update_progress(progress_message, counts, "이모지 삭제 중")
+        return counts["emojis"]
 
-    async def _delete_stickers(self, guild: discord.Guild, progress_user: discord.abc.User):
-        deleted = 0
+    async def _delete_stickers(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
         for sticker in list(getattr(guild, "stickers", [])):
             if guild.id in self._stop_flags:
                 break
             try:
                 await sticker.delete(reason="Nuke cleanup")
-                deleted += 1
+                counts["stickers"] += 1
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            await self.config.guild(guild).deleted_stickers.set(deleted)
-            await self._send_dm(progress_user, f"🔥 서버 정리 중... (스티커 {deleted}개 삭제)")
-            await asyncio.sleep(0.5)
-        return deleted
+            await self.config.guild(guild).deleted_stickers.set(counts["stickers"])
+            await self._maybe_update_progress(progress_message, counts, "스티커 삭제 중")
+        return counts["stickers"]
 
-    async def _delete_sounds(self, guild: discord.Guild, progress_user: discord.abc.User):
-        deleted = 0
+    async def _delete_sounds(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
         sounds = getattr(guild, "soundboard_sounds", None)
         if sounds is None:
-            return deleted
+            return counts["sounds"]
         for sound in list(sounds):
             if guild.id in self._stop_flags:
                 break
             try:
                 await sound.delete(reason="Nuke cleanup")
-                deleted += 1
+                counts["sounds"] += 1
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            await self.config.guild(guild).deleted_sounds.set(deleted)
-            await self._send_dm(progress_user, f"🔥 서버 정리 중... (사운드 보드 {deleted}개 삭제)")
-            await asyncio.sleep(0.5)
-        return deleted
+            await self.config.guild(guild).deleted_sounds.set(counts["sounds"])
+            await self._maybe_update_progress(progress_message, counts, "사운드 보드 삭제 중")
+        return counts["sounds"]
 
     @commands.command(hidden=True)
     @commands.guild_only()
@@ -170,35 +220,47 @@ class Nuke(commands.Cog):
         if await self.config.guild(ctx.guild).nuke_in_progress():
             return
 
-        confirm_msg = await ctx.send("fr?")
-        try:
-            await confirm_msg.add_reaction("✅")
-        except discord.HTTPException:
-            pass
-
-        confirmed = await self._wait_for_confirm(ctx, confirm_msg)
-        if not confirmed:
-            return
-
         await self._reset_progress(ctx.guild)
         await self.config.guild(ctx.guild).nuke_in_progress.set(True)
-        progress_dm = await self._send_dm(ctx.author, "🔥 서버 정리 중... (진행률 표시)")
+        progress_dm = await self._send_dm(ctx.author, "🔄 서버 정리 준비 중...")
+        if not progress_dm:
+            await self.config.guild(ctx.guild).nuke_in_progress.set(False)
+            return
 
         self._stop_flags.discard(ctx.guild.id)
 
-        deleted_channels = await self._delete_channels(ctx.guild, ctx.author)
+        counts = {
+            "channels": 0,
+            "roles": 0,
+            "emojis": 0,
+            "stickers": 0,
+            "sounds": 0,
+        }
+        start_time = asyncio.get_running_loop().time()
+
+        await self._send_progress_embed(
+            progress_dm,
+            "🔥 서버 정리 중...",
+            0,
+            0,
+            0,
+            0,
+            0,
+            "시작",
+        )
+        deleted_channels = await self._delete_channels(ctx.guild, progress_dm, counts)
         deleted_roles = 0
         if ctx.guild.id not in self._stop_flags:
-            deleted_roles = await self._delete_roles(ctx.guild, ctx.author)
+            deleted_roles = await self._delete_roles(ctx.guild, progress_dm, counts)
         deleted_emojis = 0
         if ctx.guild.id not in self._stop_flags:
-            deleted_emojis = await self._delete_emojis(ctx.guild, ctx.author)
+            deleted_emojis = await self._delete_emojis(ctx.guild, progress_dm, counts)
         deleted_stickers = 0
         if ctx.guild.id not in self._stop_flags:
-            deleted_stickers = await self._delete_stickers(ctx.guild, ctx.author)
+            deleted_stickers = await self._delete_stickers(ctx.guild, progress_dm, counts)
         deleted_sounds = 0
         if ctx.guild.id not in self._stop_flags:
-            deleted_sounds = await self._delete_sounds(ctx.guild, ctx.author)
+            deleted_sounds = await self._delete_sounds(ctx.guild, progress_dm, counts)
 
         await self.config.guild(ctx.guild).deleted_channels.set(deleted_channels)
         await self.config.guild(ctx.guild).deleted_roles.set(deleted_roles)
@@ -206,35 +268,51 @@ class Nuke(commands.Cog):
         await self.config.guild(ctx.guild).deleted_stickers.set(deleted_stickers)
         await self.config.guild(ctx.guild).deleted_sounds.set(deleted_sounds)
 
+        elapsed = asyncio.get_running_loop().time() - start_time
+
         if ctx.guild.id in self._stop_flags:
-            await self._send_dm(
-                ctx.author,
-                "⏸️ 중단됨. 채널 {0}개, 역할 {1}개, 이모지 {2}개, "
-                "스티커 {3}개, 사운드 보드 {4}개 삭제 완료.".format(
-                    deleted_channels,
-                    deleted_roles,
-                    deleted_emojis,
-                    deleted_stickers,
-                    deleted_sounds,
-                ),
+            await self._send_progress_embed(
+                progress_dm,
+                "⏸️ 중단됨",
+                deleted_channels,
+                deleted_roles,
+                deleted_emojis,
+                deleted_stickers,
+                deleted_sounds,
+                "중단됨",
             )
         else:
-            await self._send_dm(
-                ctx.author,
-                "✅ 서버 정리 완료. 채널 {0}개, 역할 {1}개, 이모지 {2}개, "
-                "스티커 {3}개, 사운드 보드 {4}개 삭제됨.".format(
-                    deleted_channels,
-                    deleted_roles,
-                    deleted_emojis,
-                    deleted_stickers,
-                    deleted_sounds,
-                ),
+            await self._send_progress_embed(
+                progress_dm,
+                "✅ 서버 정리 완료",
+                deleted_channels,
+                deleted_roles,
+                deleted_emojis,
+                deleted_stickers,
+                deleted_sounds,
+                "완료",
             )
+        await self._send_dm(
+            ctx.author,
+            "⏱️ 소요 시간: {0:.2f}초\n"
+            "채널: {1}개\n"
+            "역할: {2}개\n"
+            "이모지: {3}개\n"
+            "스티커: {4}개\n"
+            "사운드 보드: {5}개".format(
+                elapsed,
+                deleted_channels,
+                deleted_roles,
+                deleted_emojis,
+                deleted_stickers,
+                deleted_sounds,
+            ),
+        )
 
         await self.config.guild(ctx.guild).nuke_in_progress.set(False)
         if progress_dm:
             try:
-                await progress_dm.edit(content="✅ 완료")
+                await progress_dm.edit(content=None)
             except discord.HTTPException:
                 pass
 
@@ -256,14 +334,15 @@ class Nuke(commands.Cog):
         deleted_emojis = await self.config.guild(ctx.guild).deleted_emojis()
         deleted_stickers = await self.config.guild(ctx.guild).deleted_stickers()
         deleted_sounds = await self.config.guild(ctx.guild).deleted_sounds()
-        await self._send_dm(
-            ctx.author,
-            "⏸️ 중단됨. 채널 {0}개, 역할 {1}개, 이모지 {2}개, 스티커 {3}개, "
-            "사운드 보드 {4}개 삭제 완료.".format(
+        progress_dm = await self._send_dm(ctx.author, "⏸️ 중단 처리 중...")
+        if progress_dm:
+            await self._send_progress_embed(
+                progress_dm,
+                "⏸️ 중단됨",
                 deleted_channels,
                 deleted_roles,
                 deleted_emojis,
                 deleted_stickers,
                 deleted_sounds,
-            ),
-        )
+                "중단됨",
+            )
