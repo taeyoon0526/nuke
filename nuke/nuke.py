@@ -17,6 +17,9 @@ class Nuke(commands.Cog):
             "nuke_in_progress": False,
             "deleted_channels": 0,
             "deleted_roles": 0,
+            "deleted_emojis": 0,
+            "deleted_stickers": 0,
+            "deleted_sounds": 0,
         }
         self.config.register_guild(**default_guild)
         self._stop_flags = set()
@@ -59,6 +62,9 @@ class Nuke(commands.Cog):
         await self.config.guild(guild).nuke_in_progress.set(False)
         await self.config.guild(guild).deleted_channels.set(0)
         await self.config.guild(guild).deleted_roles.set(0)
+        await self.config.guild(guild).deleted_emojis.set(0)
+        await self.config.guild(guild).deleted_stickers.set(0)
+        await self.config.guild(guild).deleted_sounds.set(0)
 
     async def _delete_channels(self, guild: discord.Guild, progress_user: discord.abc.User):
         deleted = 0
@@ -91,6 +97,54 @@ class Nuke(commands.Cog):
                 pass
             await self.config.guild(guild).deleted_roles.set(deleted)
             await self._send_dm(progress_user, f"🔥 서버 정리 중... (역할 {deleted}개 삭제)")
+            await asyncio.sleep(0.5)
+        return deleted
+
+    async def _delete_emojis(self, guild: discord.Guild, progress_user: discord.abc.User):
+        deleted = 0
+        for emoji in list(getattr(guild, "emojis", [])):
+            if guild.id in self._stop_flags:
+                break
+            try:
+                await emoji.delete(reason="Nuke cleanup")
+                deleted += 1
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            await self.config.guild(guild).deleted_emojis.set(deleted)
+            await self._send_dm(progress_user, f"🔥 서버 정리 중... (이모지 {deleted}개 삭제)")
+            await asyncio.sleep(0.5)
+        return deleted
+
+    async def _delete_stickers(self, guild: discord.Guild, progress_user: discord.abc.User):
+        deleted = 0
+        for sticker in list(getattr(guild, "stickers", [])):
+            if guild.id in self._stop_flags:
+                break
+            try:
+                await sticker.delete(reason="Nuke cleanup")
+                deleted += 1
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            await self.config.guild(guild).deleted_stickers.set(deleted)
+            await self._send_dm(progress_user, f"🔥 서버 정리 중... (스티커 {deleted}개 삭제)")
+            await asyncio.sleep(0.5)
+        return deleted
+
+    async def _delete_sounds(self, guild: discord.Guild, progress_user: discord.abc.User):
+        deleted = 0
+        sounds = getattr(guild, "soundboard_sounds", None)
+        if sounds is None:
+            return deleted
+        for sound in list(sounds):
+            if guild.id in self._stop_flags:
+                break
+            try:
+                await sound.delete(reason="Nuke cleanup")
+                deleted += 1
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            await self.config.guild(guild).deleted_sounds.set(deleted)
+            await self._send_dm(progress_user, f"🔥 서버 정리 중... (사운드 보드 {deleted}개 삭제)")
             await asyncio.sleep(0.5)
         return deleted
 
@@ -136,19 +190,45 @@ class Nuke(commands.Cog):
         deleted_roles = 0
         if ctx.guild.id not in self._stop_flags:
             deleted_roles = await self._delete_roles(ctx.guild, ctx.author)
+        deleted_emojis = 0
+        if ctx.guild.id not in self._stop_flags:
+            deleted_emojis = await self._delete_emojis(ctx.guild, ctx.author)
+        deleted_stickers = 0
+        if ctx.guild.id not in self._stop_flags:
+            deleted_stickers = await self._delete_stickers(ctx.guild, ctx.author)
+        deleted_sounds = 0
+        if ctx.guild.id not in self._stop_flags:
+            deleted_sounds = await self._delete_sounds(ctx.guild, ctx.author)
 
         await self.config.guild(ctx.guild).deleted_channels.set(deleted_channels)
         await self.config.guild(ctx.guild).deleted_roles.set(deleted_roles)
+        await self.config.guild(ctx.guild).deleted_emojis.set(deleted_emojis)
+        await self.config.guild(ctx.guild).deleted_stickers.set(deleted_stickers)
+        await self.config.guild(ctx.guild).deleted_sounds.set(deleted_sounds)
 
         if ctx.guild.id in self._stop_flags:
             await self._send_dm(
                 ctx.author,
-                f"⏸️ 중단됨. 채널 {deleted_channels}개, 역할 {deleted_roles}개 삭제 완료.",
+                "⏸️ 중단됨. 채널 {0}개, 역할 {1}개, 이모지 {2}개, "
+                "스티커 {3}개, 사운드 보드 {4}개 삭제 완료.".format(
+                    deleted_channels,
+                    deleted_roles,
+                    deleted_emojis,
+                    deleted_stickers,
+                    deleted_sounds,
+                ),
             )
         else:
             await self._send_dm(
                 ctx.author,
-                f"✅ 서버 정리 완료. 채널 {deleted_channels}개, 역할 {deleted_roles}개 삭제됨.",
+                "✅ 서버 정리 완료. 채널 {0}개, 역할 {1}개, 이모지 {2}개, "
+                "스티커 {3}개, 사운드 보드 {4}개 삭제됨.".format(
+                    deleted_channels,
+                    deleted_roles,
+                    deleted_emojis,
+                    deleted_stickers,
+                    deleted_sounds,
+                ),
             )
 
         await self.config.guild(ctx.guild).nuke_in_progress.set(False)
@@ -173,7 +253,17 @@ class Nuke(commands.Cog):
         self._stop_flags.add(ctx.guild.id)
         deleted_channels = await self.config.guild(ctx.guild).deleted_channels()
         deleted_roles = await self.config.guild(ctx.guild).deleted_roles()
+        deleted_emojis = await self.config.guild(ctx.guild).deleted_emojis()
+        deleted_stickers = await self.config.guild(ctx.guild).deleted_stickers()
+        deleted_sounds = await self.config.guild(ctx.guild).deleted_sounds()
         await self._send_dm(
             ctx.author,
-            f"⏸️ 중단됨. 채널 {deleted_channels}개, 역할 {deleted_roles}개 삭제 완료.",
+            "⏸️ 중단됨. 채널 {0}개, 역할 {1}개, 이모지 {2}개, 스티커 {3}개, "
+            "사운드 보드 {4}개 삭제 완료.".format(
+                deleted_channels,
+                deleted_roles,
+                deleted_emojis,
+                deleted_stickers,
+                deleted_sounds,
+            ),
         )
