@@ -58,22 +58,25 @@ class Nuke(commands.Cog):
         view.add_item(ui.Separator(visible=True))
 
         if guild is not None and (guild.icon or guild.banner):
-            items = []
+            assets = ui.ActionRow()
             if guild.icon:
-                items.append(
-                    discord.MediaGalleryItem(
-                        str(guild.icon.url),
-                        description="서버 아이콘",
+                assets.add_item(
+                    ui.Button(
+                        label="아이콘 보기",
+                        style=discord.ButtonStyle.link,
+                        url=str(guild.icon.url),
                     )
                 )
             if guild.banner:
-                items.append(
-                    discord.MediaGalleryItem(
-                        str(guild.banner.url),
-                        description="서버 배너",
+                assets.add_item(
+                    ui.Button(
+                        label="배너 보기",
+                        style=discord.ButtonStyle.link,
+                        url=str(guild.banner.url),
                     )
                 )
-            view.add_item(ui.MediaGallery(items))
+            if assets.children:
+                view.add_item(assets)
 
         details = ui.Container(accent_color=0xFF6B6B)
         details.add_item(ui.TextDisplay(f"**사용자:** {author} ({author.id})"))
