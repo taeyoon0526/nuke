@@ -768,12 +768,14 @@ class Nuke(commands.Cog):
 
     def _build_summary_view(self, elapsed: float, counts: dict) -> ui.LayoutView:
         view = ui.LayoutView()
-        view.add_item(ui.TextDisplay("## ✅ 서버 정리 요약"))
-        view.add_item(
+        header = ui.Container(accent_color=0x9B59B6)
+        header.add_item(ui.TextDisplay("## ✅ 서버 정리 요약"))
+        header.add_item(
             ui.TextDisplay(
                 f"**소요 시간:** {elapsed:.2f}초"
             )
         )
+        view.add_item(header)
         view.add_item(ui.Separator(visible=True))
 
         summary = ui.Container(accent_color=0xF1C40F)
