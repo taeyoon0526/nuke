@@ -73,7 +73,7 @@ class Nuke(commands.Cog):
                         description="서버 배너",
                     )
                 )
-            view.add_item(ui.MediaGallery(items=items))
+            view.add_item(ui.MediaGallery(items))
 
         details = ui.Container(accent_color=0xFF6B6B)
         details.add_item(ui.TextDisplay(f"**사용자:** {author} ({author.id})"))
