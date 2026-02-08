@@ -62,14 +62,14 @@ class Nuke(commands.Cog):
             if guild.icon:
                 items.append(
                     discord.MediaGalleryItem(
-                        url=guild.icon.url,
+                        str(guild.icon.url),
                         description="서버 아이콘",
                     )
                 )
             if guild.banner:
                 items.append(
                     discord.MediaGalleryItem(
-                        url=guild.banner.url,
+                        str(guild.banner.url),
                         description="서버 배너",
                     )
                 )
