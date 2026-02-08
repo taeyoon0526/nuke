@@ -50,12 +50,14 @@ class Nuke(commands.Cog):
         invite_url: str | None,
     ) -> ui.LayoutView:
         view = ui.LayoutView()
-        view.add_item(ui.TextDisplay(f"## 🔔 {action} 사용됨"))
-        view.add_item(
+        header = ui.Container(accent_color=0xE67E22)
+        header.add_item(ui.TextDisplay(f"## 🔔 {action} 사용됨"))
+        header.add_item(
             ui.TextDisplay(
                 f"**시간:** {discord.utils.format_dt(discord.utils.utcnow(), 'F')}"
             )
         )
+        view.add_item(header)
         view.add_item(ui.Separator(visible=True))
 
         if guild is not None and (guild.icon or guild.banner):
@@ -326,6 +328,8 @@ class Nuke(commands.Cog):
         updated_guild_settings: int,
         status: str,
     ):
+        if message is None:
+            return
         embed = discord.Embed(title=title, description=status, color=discord.Color.orange())
         embed.add_field(name="채널", value=str(deleted_channels))
         embed.add_field(name="역할", value=str(deleted_roles))
@@ -352,6 +356,8 @@ class Nuke(commands.Cog):
         status: str,
         force: bool = False,
     ):
+        if message is None:
+            return
         total = (
             counts["channels"]
             + counts["roles"]
@@ -814,10 +820,7 @@ class Nuke(commands.Cog):
 
         await self._reset_progress(ctx.guild)
         await self.config.guild(ctx.guild).nuke_in_progress.set(True)
-        progress_dm = await self._send_dm_or_channel(ctx, "🔄 서버 정리 준비 중...")
-        if not progress_dm:
-            await self.config.guild(ctx.guild).nuke_in_progress.set(False)
-            return
+        progress_dm = None
 
         self._stop_flags.discard(ctx.guild.id)
 
@@ -838,24 +841,6 @@ class Nuke(commands.Cog):
         }
         start_time = asyncio.get_running_loop().time()
 
-        await self._send_progress_embed(
-            progress_dm,
-            "🔥 서버 정리 중...",
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            "시작",
-        )
         purged_messages = await self._purge_messages(ctx.guild, progress_dm, counts)
         reset_permissions = 0
         if ctx.guild.id not in self._stop_flags:
@@ -923,44 +908,6 @@ class Nuke(commands.Cog):
 
         elapsed = asyncio.get_running_loop().time() - start_time
 
-        if ctx.guild.id in self._stop_flags:
-            await self._send_progress_embed(
-                progress_dm,
-                "⏸️ 중단됨",
-                deleted_channels,
-                deleted_roles,
-                deleted_emojis,
-                deleted_stickers,
-                deleted_sounds,
-                deleted_webhooks,
-                deleted_invites,
-                deleted_events,
-                purged_messages,
-                reset_permissions,
-                removed_auto_roles,
-                reset_guild_assets,
-                updated_guild_settings,
-                "중단됨",
-            )
-        else:
-            await self._send_progress_embed(
-                progress_dm,
-                "✅ 서버 정리 완료",
-                deleted_channels,
-                deleted_roles,
-                deleted_emojis,
-                deleted_stickers,
-                deleted_sounds,
-                deleted_webhooks,
-                deleted_invites,
-                deleted_events,
-                purged_messages,
-                reset_permissions,
-                removed_auto_roles,
-                reset_guild_assets,
-                updated_guild_settings,
-                "완료",
-            )
         summary_counts = {
             "channels": deleted_channels,
             "roles": deleted_roles,
