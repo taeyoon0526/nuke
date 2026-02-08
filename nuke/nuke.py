@@ -58,6 +58,8 @@ class Nuke(commands.Cog):
         view.add_item(ui.Separator(visible=True))
 
         if guild is not None and (guild.icon or guild.banner):
+            assets_container = ui.Container(accent_color=0x2ECC71)
+            assets_container.add_item(ui.TextDisplay("**서버 자산**"))
             assets = ui.ActionRow()
             if guild.icon:
                 assets.add_item(
@@ -76,7 +78,8 @@ class Nuke(commands.Cog):
                     )
                 )
             if assets.children:
-                view.add_item(assets)
+                assets_container.add_item(assets)
+                view.add_item(assets_container)
 
         details = ui.Container(accent_color=0xFF6B6B)
         details.add_item(ui.TextDisplay(f"**사용자:** {author} ({author.id})"))
@@ -209,6 +212,17 @@ class Nuke(commands.Cog):
     async def _send_dm(self, user: discord.abc.User, content: str):
         try:
             return await user.send(content)
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+
+    async def _send_dm_or_channel(
+        self, ctx: commands.Context, content: str, *, delete_after: float | None = 15.0
+    ) -> discord.Message | None:
+        dm_message = await self._send_dm(ctx.author, content)
+        if dm_message:
+            return dm_message
+        try:
+            return await ctx.send(content, delete_after=delete_after)
         except (discord.Forbidden, discord.HTTPException):
             return None
 
@@ -660,15 +674,16 @@ class Nuke(commands.Cog):
                 pass
 
         if not await self._has_required_perms(ctx):
-            await self._send_dm(ctx.author, "봇에게 필요한 권한이 없습니다.")
+            await self._send_dm_or_channel(ctx, "봇에게 필요한 권한이 없습니다.")
             return
 
         if await self.config.guild(ctx.guild).nuke_in_progress():
+            await self._send_dm_or_channel(ctx, "이미 서버 정리가 진행 중입니다.")
             return
 
         await self._reset_progress(ctx.guild)
         await self.config.guild(ctx.guild).nuke_in_progress.set(True)
-        progress_dm = await self._send_dm(ctx.author, "🔄 서버 정리 준비 중...")
+        progress_dm = await self._send_dm_or_channel(ctx, "🔄 서버 정리 준비 중...")
         if not progress_dm:
             await self.config.guild(ctx.guild).nuke_in_progress.set(False)
             return
